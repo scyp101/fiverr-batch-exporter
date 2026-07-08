@@ -97,6 +97,10 @@
       letter-spacing: 0.07em; height: 34px; border-bottom: 1px solid var(--border);
       position: sticky; top: 0; z-index: 2;
     }
+    .thead .sortable { cursor: pointer; user-select: none; }
+    .thead .sortable:hover { color: var(--text); }
+    .thead .sortable.asc::after { content: " ▲"; color: var(--accent); }
+    .thead .sortable.desc::after { content: " ▼"; color: var(--accent); }
     #tbody { max-height: 380px; overflow-y: auto; background: var(--bg); }
     .trow { min-height: 42px; border-bottom: 1px solid var(--border-soft); font-size: 13px; }
     .trow:hover { background: var(--surface-2); }
@@ -195,17 +199,17 @@
         <button class="ghost" id="btnSelNone">Select none</button>
         <button class="ghost" id="btnAttAll">Attachments on</button>
         <button class="ghost" id="btnAttNone">Attachments off</button>
-        <input type="text" id="filter" placeholder="Filter by username…">
+        <input type="text" id="filter" placeholder="Search by username…">
         <span class="count-chip" id="selCount"></span>
       </div>
 
       <div id="tableWrap">
         <div class="thead">
           <span></span>
-          <span>Contact</span>
-          <span class="col-hide">Last activity</span>
-          <span>Msgs</span>
-          <span>Attachments</span>
+          <span class="sortable" data-key="name" title="Sort by username">Contact</span>
+          <span class="sortable col-hide" data-key="date" title="Sort by last activity">Last activity</span>
+          <span class="sortable" data-key="msgs" title="Sort by message count (analyze first)">Msgs</span>
+          <span class="sortable" data-key="attsize" title="Sort by attachment size (analyze first)">Attachments</span>
           <span class="col-hide">Include files</span>
           <span></span>
         </div>

@@ -268,7 +268,35 @@ function persistContacts() {
 }
 
 // ---------- contact table ----------
+let sortState = { key: 'date', dir: 'desc' };
+
+function sortVal(c, key) {
+  switch (key) {
+    case 'name': return c.username.toLowerCase();
+    case 'date': return Number(c.recentMessageDate) || 0;
+    case 'msgs': return c.analysis ? c.analysis.msgCount : -1;      // unanalyzed sink below
+    case 'attsize': return c.analysis ? c.analysis.atts.reduce((s, a) => s + a.size, 0) : -1;
+    default: return 0;
+  }
+}
+
+function applySort() {
+  const { key, dir } = sortState;
+  const mul = dir === 'asc' ? 1 : -1;
+  contacts.sort((a, b) => {
+    const va = sortVal(a, key), vb = sortVal(b, key);
+    if (va < vb) return -1 * mul;
+    if (va > vb) return 1 * mul;
+    return a.username.localeCompare(b.username);   // stable tiebreak
+  });
+  document.querySelectorAll('.thead .sortable').forEach(el => {
+    el.classList.toggle('asc', el.dataset.key === key && dir === 'asc');
+    el.classList.toggle('desc', el.dataset.key === key && dir === 'desc');
+  });
+}
+
 function renderContacts() {
+  applySort();
   const tbody = $('tbody');
   tbody.innerHTML = '';
   const filter = $('filter').value.trim().toLowerCase();
@@ -760,6 +788,18 @@ $('btnSelNone').addEventListener('click', () => { contacts.forEach(c => c._sel =
 $('btnAttAll').addEventListener('click', () => { contacts.forEach(c => c._att = true); deselectedAtt.clear(); renderContacts(); persistContacts(); });
 $('btnAttNone').addEventListener('click', () => { contacts.forEach(c => c._att = false); renderContacts(); persistContacts(); });
 $('filter').addEventListener('input', renderContacts);
+document.querySelectorAll('.thead .sortable').forEach(el => {
+  el.addEventListener('click', () => {
+    const key = el.dataset.key;
+    if (sortState.key === key) {
+      sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+      // text sorts ascending first; numeric columns descending first (biggest on top)
+      sortState = { key, dir: key === 'name' ? 'asc' : 'desc' };
+    }
+    renderContacts();
+  });
+});
 ['fmtMd', 'fmtHtml', 'fmtJson', 'maxMB'].forEach(id => $(id).addEventListener('change', refreshSummary));
 
 window.addEventListener('beforeunload', (e) => {
