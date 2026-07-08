@@ -410,7 +410,8 @@ function refreshSummary() {
   $('tMsgs').textContent = msgs.toLocaleString();
   $('tAtts').textContent = attCount.toLocaleString();
   $('tAttSize').textContent = fmtSize(attSize);
-  $('tTotal').innerHTML = `${fmtSize(total)} <small>· ~${parts} part${parts > 1 ? 's' : ''}</small>`;
+  $('tTotal').textContent = fmtSize(total);
+  $('tTotalParts').textContent = `~${parts} ZIP part${parts > 1 ? 's' : ''}`;
   $('tiles').style.display = 'grid';
 
   const unAnalyzed = selected.length - analyzed.length;
