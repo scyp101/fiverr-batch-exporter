@@ -145,6 +145,37 @@ async function fiverrJson(url, retries = 2) {
   }
 }
 
+// Fetch a fiverr.com page as text (order pages), with fiverr-tab fallback.
+async function fiverrText(url, retries = 2) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const r = await fetch(url, { credentials: 'include' });
+      if (r.ok) return await r.text();
+      if (r.status === 429) { await sleep(5000 * (attempt + 1)); if (attempt < retries) continue; }
+      throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    } catch (e) {
+      if (attempt < retries) { await sleep(1500 * (attempt + 1)); continue; }
+      // last resort: read through an open fiverr tab
+      const tabs = await chrome.tabs.query({ url: 'https://www.fiverr.com/*' });
+      if (!tabs.length) throw e;
+      const res = await chrome.scripting.executeScript({
+        target: { tabId: tabs[0].id },
+        func: async (u) => {
+          try {
+            const r = await fetch(u, { credentials: 'include' });
+            if (!r.ok) return { __err: `HTTP ${r.status} ${r.statusText}` };
+            return { __text: await r.text() };
+          } catch (err) { return { __err: err.message }; }
+        },
+        args: [url]
+      });
+      const out = res && res[0] && res[0].result;
+      if (!out || out.__err) throw new Error((out && out.__err) || e.message);
+      return out.__text;
+    }
+  }
+}
+
 async function fetchAttachmentBlob(url, retries = 2) {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -214,6 +245,7 @@ function attIncluded(contact, entry) {
 
 // ---------- contacts ----------
 async function fetchAllContacts() {
+  if (running) return;
   const btn = $('btnFetchContacts');
   btn.disabled = true;
   $('contactStatus').textContent = 'Fetching contacts…';
@@ -289,7 +321,7 @@ function applySort() {
     if (va > vb) return 1 * mul;
     return a.username.localeCompare(b.username);   // stable tiebreak
   });
-  document.querySelectorAll('.thead .sortable').forEach(el => {
+  document.querySelectorAll('#theadMessages .sortable').forEach(el => {
     el.classList.toggle('asc', el.dataset.key === key && dir === 'asc');
     el.classList.toggle('desc', el.dataset.key === key && dir === 'desc');
   });
@@ -378,8 +410,8 @@ function renderContacts() {
 
   $('tableWrap').style.display = 'block';
   $('tableTools').style.display = 'flex';
-  $('btnExport').disabled = contacts.length === 0;
   $('btnAnalyze').disabled = contacts.length === 0;
+  updateExportButton();
   refreshSummary();
 }
 
@@ -453,8 +485,9 @@ function refreshSummary() {
   }
 }
 
-// ---------- analyze ----------
+// ---------- analyze (messages) ----------
 async function runAnalyze() {
+  if (running) return;
   const selected = contacts.filter(c => c._sel !== false);
   if (!selected.length) return;
 
@@ -673,8 +706,9 @@ class ZipBatcher {
   }
 }
 
-// ---------- main export ----------
+// ---------- main export (messages) ----------
 async function runExport() {
+  if (running) return;
   const selected = contacts.filter(c => c._sel !== false);
   if (!selected.length) return;
 
@@ -778,17 +812,695 @@ async function runExport() {
   $('btnCancel').style.display = 'none';
 }
 
+/* ==================================================================
+ *                            ORDERS
+ * ================================================================== */
+
+let orders = [];                 // [{orderId, buyer, title, total, currency, dateMs, status, _sel, _att, analysis}]
+const orderCache = new Map();    // orderId -> { page, details }  (session only)
+let orderSort = { key: 'date', dir: 'desc' };
+
+// ---------- orders list ----------
+async function fetchOrdersPage(filter, cursor) {
+  const input = { '0': cursor ? { filter, cursor: { cursor } } : { filter } };
+  const url = `https://www.fiverr.com/manage_orders/api/fetchOrders?batch=1&input=${encodeURIComponent(JSON.stringify(input))}`;
+  const j = await fiverrJson(url);
+  const data = j && j[0] && j[0].result && j[0].result.data;
+  if (!data) throw new Error('Unexpected fetchOrders response shape');
+  return data;
+}
+
+async function fetchAllOrders() {
+  if (running) return;
+  const btn = $('btnFetchOrders');
+  const filter = $('orderFilter').value;
+  btn.disabled = true;
+  $('orderStatus').textContent = `Fetching "${filter}" orders…`;
+  $('orderStatus').classList.remove('err');
+  try {
+    const seen = new Map(orders.map(o => [o.orderId, o]));
+    let cursor = null;
+    let batch = 1;
+    let added = 0;
+    while (batch < 500) {
+      const data = await fetchOrdersPage(filter, cursor);
+      const results = data.results || [];
+      if (!results.length) break;
+      for (const r of results) {
+        if (!r || !r.order_id || seen.has(r.order_id)) continue;
+        seen.set(r.order_id, {
+          orderId: r.order_id,
+          buyer: r.username || 'unknown',
+          title: r.title || '',
+          total: Number(r.total) || 0,
+          currency: r.currency_code || 'USD',
+          dateMs: Number(r.due_date_ms) || 0,
+          deliveredAt: r.delivered_at || '',
+          status: r.status_text || r.status || '',
+          _sel: true, _att: true
+        });
+        added++;
+      }
+      const next = data.nextPageParams && data.nextPageParams.cursor;
+      if (!next || next === cursor) break;
+      cursor = next;
+      $('orderStatus').textContent = `Batch ${batch}: ${seen.size} orders so far…`;
+      batch++;
+      await sleep(500);
+    }
+    orders = [...seen.values()];
+    persistOrders();
+    renderOrders();
+    $('orderStatus').textContent = `Done — ${added} new "${filter}" orders (${orders.length} total in list).`;
+  } catch (e) {
+    $('orderStatus').textContent = 'Error: ' + e.message;
+    $('orderStatus').classList.add('err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function persistOrders() {
+  try {
+    const slim = orders.map(o => ({
+      ...o,
+      analysis: o.analysis ? {
+        earned: o.analysis.earned,
+        activityCount: o.analysis.activityCount,
+        completedTs: o.analysis.completedTs,
+        textSizes: o.analysis.textSizes,
+        files: o.analysis.files.map(f => ({ id: f.id, name: f.name, ts: f.ts, size: f.size, zipName: f.zipName, source: f.source, hasUrl: !!f.url }))
+      } : undefined
+    }));
+    chrome.storage.local.set({ batchExportOrders: slim, batchExportDeselected: [...deselectedAtt] });
+  } catch (e) { /* non-fatal */ }
+}
+
+// ---------- order page parsing ----------
+async function fetchOrderData(orderId) {
+  if (orderCache.has(orderId)) return orderCache.get(orderId);
+  const html = await fiverrText(`https://www.fiverr.com/orders/${encodeURIComponent(orderId)}/activities`);
+  const m = html.match(/<script type="application\/json" id="perseus-initial-props">\s*([\s\S]*?)\s*<\/script>/);
+  if (!m) throw new Error('Order data not found in page (are you logged in?)');
+  const page = JSON.parse(m[1]);
+  let details = null;
+  try {
+    details = await fiverrJson(`https://www.fiverr.com/orders/${encodeURIComponent(orderId)}/ajax/fetch_order_details`);
+  } catch (e) { /* some order types have no details endpoint — non-fatal */ }
+  const data = { page, details };
+  orderCache.set(orderId, data);
+  return data;
+}
+
+// Collect every downloadable file in an order: delivery files plus any
+// activity attachments (revision-request references, requirement uploads, …).
+// Timestamps on order pages are in seconds; toMs() normalizes.
+function indexOrderFiles(orderId, page) {
+  const used = new Set();
+  const seenFileIds = new Set();
+  const files = [];
+  let seq = 0;
+  const push = (f, ts, source) => {
+    if (!f || !f.downloadUrl) return;
+    if (f.id) { if (seenFileIds.has(f.id)) return; seenFileIds.add(f.id); }
+    const name = f.fileName || f.file_name || 'file';
+    files.push({
+      id: `${orderId}::${seq++}`,
+      fileId: f.id || null,
+      url: f.downloadUrl,
+      name,
+      ts,
+      size: Number(f.fileSize || f.file_size) || 0,
+      source,
+      zipName: uniqueName(used, `${tsStamp(ts)}_${sanitize(name)}`)
+    });
+  };
+  for (const d of (page.deliveries || [])) {
+    for (const f of (d.files || [])) push(f, d.deliveredAt, `delivery #${d.serialNumber || '?'}`);
+  }
+  for (const a of (page.activities || [])) {
+    for (const f of (a.attachments || [])) push(f, a.occurredAt, a.type || 'activity');
+    for (const f of (a.files || [])) push(f, a.occurredAt, a.type || 'activity');
+  }
+  return files;
+}
+
+function orderMoney(amount, currency) {
+  if (amount === null || amount === undefined || isNaN(Number(amount))) return '—';
+  return `${Number(amount).toFixed(2)} ${currency || 'USD'}`;
+}
+
+function orderFolderTs(o) {
+  return (o.analysis && o.analysis.completedTs) ? toMs(o.analysis.completedTs) : (o.dateMs || Date.now());
+}
+
+// ---------- order transcript builders ----------
+function describeActivity(a, page, fileStates, filesByFileId, linkFn) {
+  const lines = [];
+  const t = a.type || 'event';
+  const renderFiles = (list) => {
+    for (const f of (list || [])) {
+      const key = f.id && filesByFileId.get(f.id);
+      lines.push(linkFn(key, f));
+    }
+  };
+  switch (t) {
+    case 'order_placed': lines.push('**Order placed.**'); break;
+    case 'order_started': lines.push('**Order started.**'); break;
+    case 'order_completed': lines.push('**Order completed.**'); break;
+    case 'resolution_accepted': lines.push('**Resolution accepted.**'); break;
+    case 'order_cancelled': lines.push('**Order cancelled.**'); break;
+    case 'due_date_updated': lines.push(`**Due date updated** → ${fmtTime(a.dueDate)}`); break;
+    case 'delivery_received': {
+      const d = (page.deliveries || []).find(x => x.id === a.entityId);
+      lines.push(`**Delivery #${d ? (d.serialNumber || '?') : '?'}**`);
+      if (d && d.body) lines.push(d.body);
+      if (d) renderFiles(d.files);
+      break;
+    }
+    case 'revision_requested':
+      lines.push('**Revision requested**');
+      if (a.body) lines.push(a.body);
+      renderFiles(a.attachments);
+      break;
+    case 'order_rated_by_buyer': {
+      lines.push(`**Buyer review — ${a.totalRating != null ? a.totalRating / 2 : '?'} / 5**`);
+      for (const v of (a.valuations || [])) {
+        const chips = (v.chips || []).map(ch => ch.translation || ch.key || ch).join(', ');
+        lines.push(`- ${v.questionKey}: ${v.value}/5${chips ? ` — tags: ${chips}` : ''}`);
+      }
+      if (a.comment) lines.push(`> ${String(a.comment).replace(/\n/g, '\n> ')}`);
+      if (a.sellerResponse) lines.push(`**Seller reply:** ${a.sellerResponse}`);
+      break;
+    }
+    case 'order_rated_by_seller':
+      lines.push(`**Seller rated the buyer${a.totalRating != null ? ` — ${a.totalRating / 2} / 5` : ''}**`);
+      if (a.comment) lines.push(`> ${String(a.comment).replace(/\n/g, '\n> ')}`);
+      break;
+    case 'upsell_offered':
+    case 'upsell_accepted': {
+      lines.push(`**${t === 'upsell_offered' ? 'Extra offered' : 'Extra accepted'}**`);
+      for (const it of (a.items || [])) lines.push(`- ${it.title} (${orderMoney(it.price, a.billing && a.billing.currency)})`);
+      if (a.message) lines.push(a.message);
+      break;
+    }
+    default:
+      lines.push(`**${t.replace(/_/g, ' ')}**`);
+      if (a.body) lines.push(a.body);
+      renderFiles(a.attachments);
+  }
+  return lines;
+}
+
+function buildOrderMarkdown(o, page, details, files, fileStates) {
+  const filesByFileId = new Map(files.filter(f => f.fileId).map(f => [f.fileId, f]));
+  const linkFn = (entry, rawFile) => {
+    const name = (entry && entry.name) || rawFile.fileName || 'file';
+    const size = fmtSize((entry && entry.size) || rawFile.fileSize);
+    const st = entry && fileStates.get(entry.id);
+    if (st && st.included && !st.error) return `- 📎 [${name}](attachments/${entry.zipName.replace(/ /g, '%20')}) (${size})`;
+    if (st && st.error) return `- 📎 ${name} (${size}) — ⚠️ download failed: ${st.error}`;
+    return `- 📎 ${name} (${size}) — not downloaded`;
+  };
+
+  let md = `# Order ${o.orderId} — ${o.title || 'untitled'}\n\n`;
+  md += `- Buyer: ${o.buyer}\n`;
+  md += `- Status: ${o.status || page.status || ''}\n`;
+  if (page.orderCreatedAt) md += `- Created: ${fmtTime(page.orderCreatedAt)}\n`;
+  if (page.dueDate) md += `- Due: ${fmtTime(page.dueDate)}\n`;
+  if (page.completedAt) md += `- Completed: ${fmtTime(page.completedAt)}\n`;
+  md += `- Order total: ${orderMoney(o.total, o.currency)}\n`;
+  if (page.earnings && page.earnings.amount != null) md += `- Earned (after fees): ${orderMoney(page.earnings.amount, o.currency)}\n`;
+  if (details && details.purchases) {
+    const tip = details.purchases.find(x => x.type === 'TIP');
+    if (tip && tip.billing && tip.billing.grossAmount && tip.billing.grossAmount.moneyInUsd) {
+      md += `- Tip: ${orderMoney(tip.billing.grossAmount.moneyInUsd.amount / 100, 'USD')}\n`;
+    }
+  }
+  md += `- Exported: ${fmtTime(Date.now())}\n`;
+
+  if (details && details.description) {
+    md += `\n## Description\n\n${details.description}\n`;
+  }
+  if (details && details.purchases) {
+    md += `\n## Line items\n\n`;
+    for (const pu of details.purchases) {
+      for (const it of (pu.items || [])) {
+        const price = it.price && it.price.moneyInUsd ? orderMoney(it.price.moneyInUsd.amount / 100, 'USD') : '';
+        md += `- ${it.title}${it.quantity > 1 ? ` ×${it.quantity}` : ''}${price ? ` — ${price}` : ''}\n`;
+        for (const sub of (it.items || [])) md += `  - ${sub.title}\n`;
+      }
+    }
+  }
+
+  md += `\n## Timeline\n\n`;
+  const acts = [...(page.activities || [])].sort((a, b) => toMs(a.occurredAt) - toMs(b.occurredAt));
+  for (const a of acts) {
+    md += `### ${fmtTime(a.occurredAt)}\n\n`;
+    md += describeActivity(a, page, fileStates, filesByFileId, linkFn).join('\n') + '\n\n---\n\n';
+  }
+  return md;
+}
+
+function buildOrderHtml(o, page, details, files, fileStates) {
+  const filesByFileId = new Map(files.filter(f => f.fileId).map(f => [f.fileId, f]));
+  const linkFn = (entry, rawFile) => {
+    const name = escapeHtml((entry && entry.name) || rawFile.fileName || 'file');
+    const size = fmtSize((entry && entry.size) || rawFile.fileSize);
+    const st = entry && fileStates.get(entry.id);
+    if (st && st.included && !st.error) return `<a class="att" href="attachments/${encodeURIComponent(entry.zipName)}">📎 ${name} <small>(${size})</small></a>`;
+    if (st && st.error) return `<span class="att off">📎 ${name} <small>(${size}) — download failed</small></span>`;
+    return `<span class="att off">📎 ${name} <small>(${size}) — not downloaded</small></span>`;
+  };
+
+  const facts = [];
+  facts.push(['Buyer', escapeHtml(o.buyer)]);
+  facts.push(['Status', escapeHtml(o.status || page.status || '')]);
+  if (page.orderCreatedAt) facts.push(['Created', fmtTime(page.orderCreatedAt)]);
+  if (page.completedAt) facts.push(['Completed', fmtTime(page.completedAt)]);
+  facts.push(['Total', orderMoney(o.total, o.currency)]);
+  if (page.earnings && page.earnings.amount != null) facts.push(['Earned', orderMoney(page.earnings.amount, o.currency)]);
+
+  let body = `<dl class="facts">${facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('')}</dl>`;
+  if (details && details.description) body += `<div class="desc"><h2>Description</h2><p>${escapeHtml(details.description)}</p></div>`;
+
+  const acts = [...(page.activities || [])].sort((a, b) => toMs(a.occurredAt) - toMs(b.occurredAt));
+  body += '<h2>Timeline</h2>';
+  for (const a of acts) {
+    const lines = describeActivity(a, page, fileStates, filesByFileId, linkFn)
+      .map(l => l.startsWith('- 📎') || l.startsWith('<a') || l.startsWith('<span')
+        ? l.replace(/^- /, '')
+        : escapeHtml(l).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/^&gt; /gm, '').replace(/\n/g, '<br>'));
+    body += `<div class="event"><time>${fmtTime(a.occurredAt)}</time><div>${lines.join('<br>')}</div></div>`;
+  }
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Order ${escapeHtml(o.orderId)} — ${escapeHtml(o.title)}</title>
+<style>
+  body { font-family: "Segoe UI", -apple-system, sans-serif; background: #f2f4f7; color: #222; max-width: 780px; margin: 0 auto; padding: 24px 16px 60px; line-height: 1.55; }
+  h1 { font-size: 19px; color: #159957; border-bottom: 2px solid #e3e7ec; padding-bottom: 10px; }
+  h2 { font-size: 15px; color: #444; margin-top: 28px; }
+  .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; background: #fff; border: 1px solid #e3e7ec; border-radius: 10px; padding: 14px; }
+  .facts dt { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #98a2ad; }
+  .facts dd { margin: 2px 0 0; font-weight: 600; font-size: 14px; }
+  .desc p { background: #fff; border: 1px solid #e3e7ec; border-radius: 10px; padding: 14px; white-space: pre-wrap; }
+  .event { display: flex; gap: 16px; background: #fff; border: 1px solid #e3e7ec; border-radius: 10px; padding: 12px 14px; margin: 10px 0; }
+  .event time { flex: none; width: 150px; color: #98a2ad; font-size: 12.5px; }
+  .event > div { white-space: pre-wrap; word-break: break-word; font-size: 14px; }
+  .att { display: block; color: #2b6cb0; text-decoration: none; font-size: 13px; margin-top: 2px; }
+  .att:hover { text-decoration: underline; }
+  .att.off { color: #98a2ad; }
+  .att small { color: #98a2ad; }
+</style>
+</head>
+<body>
+<h1>Order ${escapeHtml(o.orderId)} — ${escapeHtml(o.title)}</h1>
+${body}
+</body>
+</html>`;
+}
+
+// ---------- orders table ----------
+function orderSortVal(o, key) {
+  switch (key) {
+    case 'buyer': return o.buyer.toLowerCase();
+    case 'date': return orderFolderTs(o);
+    case 'total': return o.total;
+    case 'filesize': return o.analysis ? o.analysis.files.reduce((s, f) => s + f.size, 0) : -1;
+    default: return 0;
+  }
+}
+
+function renderOrders() {
+  const { key, dir } = orderSort;
+  const mul = dir === 'asc' ? 1 : -1;
+  orders.sort((a, b) => {
+    const va = orderSortVal(a, key), vb = orderSortVal(b, key);
+    if (va < vb) return -1 * mul;
+    if (va > vb) return 1 * mul;
+    return a.orderId.localeCompare(b.orderId);
+  });
+  document.querySelectorAll('#theadOrders .sortable').forEach(el => {
+    el.classList.toggle('asc', el.dataset.key === key && dir === 'asc');
+    el.classList.toggle('desc', el.dataset.key === key && dir === 'desc');
+  });
+
+  const tbody = $('otbody');
+  tbody.innerHTML = '';
+  const q = $('orderSearch').value.trim().toLowerCase();
+
+  for (const o of orders) {
+    if (q && !o.buyer.toLowerCase().includes(q) && !o.title.toLowerCase().includes(q) && !o.orderId.toLowerCase().includes(q)) continue;
+    const an = o.analysis;
+
+    const row = document.createElement('div');
+    row.className = 'trow';
+
+    const selWrap = document.createElement('span');
+    const sel = document.createElement('input');
+    sel.type = 'checkbox';
+    sel.checked = o._sel !== false;
+    sel.title = 'Include this order in the export';
+    sel.addEventListener('change', () => { o._sel = sel.checked; refreshOrderSummary(); persistOrders(); });
+    selWrap.appendChild(sel);
+
+    const userCell = document.createElement('span');
+    userCell.className = 'cell-user';
+    const uname = document.createElement('div');
+    uname.className = 'uname';
+    uname.textContent = o.buyer;
+    const usub = document.createElement('div');
+    usub.className = 'usub';
+    usub.textContent = `${o.orderId} · ${o.status}${o.title ? ' · ' + o.title : ''}`;
+    usub.title = o.title;
+    userCell.append(uname, usub);
+
+    const dateCell = document.createElement('span');
+    dateCell.className = 'num col-hide';
+    dateCell.textContent = an && an.completedTs ? fmtTime(an.completedTs) : (o.deliveredAt || (o.dateMs ? dateOnly(o.dateMs) : ''));
+
+    const totalCell = document.createElement('span');
+    totalCell.className = 'num has';
+    totalCell.textContent = orderMoney(o.total, o.currency);
+
+    const fileCell = document.createElement('span');
+    fileCell.className = 'attsize';
+    if (an) {
+      const total = an.files.reduce((s, f) => s + f.size, 0);
+      fileCell.innerHTML = an.files.length
+        ? `<span class="n">${an.files.length} ×</span> ${fmtSize(total)}`
+        : '<span class="n">none</span>';
+    } else {
+      fileCell.innerHTML = '<span class="n">analyze first</span>';
+    }
+
+    const togWrap = document.createElement('span');
+    togWrap.className = 'col-hide';
+    const tog = document.createElement('input');
+    tog.type = 'checkbox';
+    tog.checked = o._att !== false;
+    tog.disabled = !!an && an.files.length === 0;
+    tog.title = 'Download this order\'s files';
+    tog.addEventListener('change', () => { o._att = tog.checked; refreshOrderSummary(); renderOrderFileList(o, listEl); persistOrders(); });
+    togWrap.appendChild(tog);
+
+    const exp = document.createElement('button');
+    exp.className = 'expander';
+    exp.textContent = '▶';
+    exp.setAttribute('aria-label', 'Show files');
+    exp.disabled = !an || an.files.length === 0;
+
+    const listEl = document.createElement('div');
+    listEl.className = 'attlist';
+    exp.addEventListener('click', () => {
+      const open = listEl.classList.toggle('open');
+      exp.classList.toggle('open', open);
+      if (open) renderOrderFileList(o, listEl);
+    });
+
+    row.append(selWrap, userCell, dateCell, totalCell, fileCell, togWrap, exp);
+    tbody.append(row, listEl);
+  }
+
+  $('orderTableWrap').style.display = 'block';
+  $('orderTools').style.display = 'flex';
+  $('btnAnalyzeOrders').disabled = orders.length === 0;
+  updateExportButton();
+  refreshOrderSummary();
+}
+
+function renderOrderFileList(o, el) {
+  el.innerHTML = '';
+  if (!o.analysis) return;
+  for (const f of o.analysis.files) {
+    const item = document.createElement('label');
+    const included = o._att !== false && !deselectedAtt.has(f.id) && !!f.url;
+    item.className = 'attitem' + (included ? '' : ' off');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !deselectedAtt.has(f.id);
+    cb.disabled = o._att === false || !f.url;
+    cb.addEventListener('change', () => {
+      if (cb.checked) deselectedAtt.delete(f.id); else deselectedAtt.add(f.id);
+      item.classList.toggle('off', !(o._att !== false && !deselectedAtt.has(f.id) && !!f.url));
+      refreshOrderSummary();
+      persistOrders();
+    });
+    const name = document.createElement('span');
+    name.className = 'aname';
+    name.textContent = `${f.zipName}  ·  ${f.source}`;
+    name.title = f.name;
+    const size = document.createElement('span');
+    size.className = 'asize';
+    size.textContent = fmtSize(f.size);
+    item.append(cb, name, size);
+    el.appendChild(item);
+  }
+}
+
+function refreshOrderSummary() {
+  const selected = orders.filter(o => o._sel !== false);
+  $('oSelCount').textContent = `${selected.length} / ${orders.length} selected`;
+
+  const analyzed = selected.filter(o => o.analysis);
+  if (!analyzed.length) { $('oTiles').style.display = 'none'; $('oTilesNote').style.display = 'none'; return; }
+
+  const fmts = { md: $('fmtMd').checked, html: $('fmtHtml').checked, json: $('fmtJson').checked };
+  let fileCount = 0, fileSize = 0, textSize = 0, earned = 0;
+  for (const o of analyzed) {
+    if (o.analysis.earned != null) earned += Number(o.analysis.earned) || 0;
+    for (const f of o.analysis.files) {
+      if (o._att !== false && !deselectedAtt.has(f.id) && f.url) { fileCount++; fileSize += f.size; }
+    }
+    const t = o.analysis.textSizes || {};
+    if (fmts.md) textSize += t.md || 0;
+    if (fmts.html) textSize += t.html || 0;
+    if (fmts.json) textSize += t.json || 0;
+  }
+  const total = fileSize + textSize;
+  const limit = Math.max(10, Number($('maxMB').value) || 500) * MB;
+  const parts = Math.max(1, Math.ceil(total / limit));
+
+  $('oCount').textContent = `${analyzed.length}`;
+  $('oEarned').textContent = `$${earned.toFixed(0)}`;
+  $('oFiles').textContent = fileCount.toLocaleString();
+  $('oFileSize').textContent = fmtSize(fileSize);
+  $('oTotal').textContent = fmtSize(total);
+  $('oTotalParts').textContent = `~${parts} ZIP part${parts > 1 ? 's' : ''}`;
+  $('oTiles').style.display = 'grid';
+
+  const unAnalyzed = selected.length - analyzed.length;
+  const note = $('oTilesNote');
+  note.textContent = unAnalyzed > 0
+    ? `${unAnalyzed} selected order${unAnalyzed > 1 ? 's are' : ' is'} not analyzed yet — actual size will be larger. "Earned" covers analyzed orders only.`
+    : 'Text-format sizes are pre-compression estimates; final ZIPs are usually a little smaller.';
+  note.style.display = 'block';
+}
+
+// ---------- analyze (orders) ----------
+async function runAnalyzeOrders() {
+  if (running) return;
+  const selected = orders.filter(o => o._sel !== false);
+  if (!selected.length) return;
+
+  running = true;
+  cancelled = false;
+  $('btnAnalyzeOrders').disabled = true;
+  $('btnFetchOrders').disabled = true;
+  $('btnExport').disabled = true;
+  $('btnCancel').style.display = 'inline-block';
+  log(`Analyzing ${selected.length} orders (metadata only — no files are downloaded)…`);
+
+  let done = 0, failed = 0;
+  for (let i = 0; i < selected.length; i++) {
+    if (cancelled) { log('Analysis cancelled.', 'log-warn'); break; }
+    const o = selected[i];
+    setProgress(i, selected.length, `analyzing ${o.orderId}`);
+    if (o.analysis && orderCache.has(o.orderId)) { done++; continue; }
+    try {
+      const { page, details } = await fetchOrderData(o.orderId);
+      const files = indexOrderFiles(o.orderId, page);
+      const fileStates = new Map(files.map(f => [f.id, { included: true }]));
+      const md = buildOrderMarkdown(o, page, details, files, fileStates);
+      const html = buildOrderHtml(o, page, details, files, fileStates);
+      const json = JSON.stringify({ summary: o, details, page }, null, 2);
+      o.analysis = {
+        files,
+        earned: page.earnings && page.earnings.amount != null ? page.earnings.amount : null,
+        activityCount: (page.activities || []).length,
+        completedTs: page.completedAt || null,
+        textSizes: { md: new Blob([md]).size, html: new Blob([html]).size, json: new Blob([json]).size }
+      };
+      done++;
+      const fs = files.reduce((s, f) => s + f.size, 0);
+      log(`· ${o.orderId} (${o.buyer}) — ${(page.activities || []).length} events, ${files.length} files (${fmtSize(fs)})`);
+    } catch (e) {
+      if (e.message === 'cancelled') { log('Analysis cancelled.', 'log-warn'); break; }
+      failed++;
+      log(`✘ analyze failed: ${o.orderId} — ${e.message}`, 'log-err');
+    }
+    await sleep(400);
+  }
+
+  setProgress(selected.length, selected.length, 'analysis complete');
+  log(`Order analysis finished: ${done} analyzed, ${failed} failed.`, failed ? 'log-warn' : 'log-ok');
+  persistOrders();
+  renderOrders();
+
+  running = false;
+  $('btnAnalyzeOrders').disabled = false;
+  $('btnFetchOrders').disabled = false;
+  updateExportButton();
+  $('btnCancel').style.display = 'none';
+}
+
+// ---------- export (orders) ----------
+async function runExportOrders() {
+  if (running) return;
+  const selected = orders.filter(o => o._sel !== false);
+  if (!selected.length) return;
+
+  const fmts = { md: $('fmtMd').checked, html: $('fmtHtml').checked, json: $('fmtJson').checked };
+  if (!fmts.md && !fmts.html && !fmts.json) {
+    log('Select at least one format (Markdown, HTML or JSON) before exporting.', 'log-err');
+    return;
+  }
+
+  running = true;
+  cancelled = false;
+  stats.done = 0; stats.fail = 0; stats.att = 0; stats.parts = 0;
+  updateStats(0);
+  $('btnExport').disabled = true;
+  $('btnAnalyzeOrders').disabled = true;
+  $('btnFetchOrders').disabled = true;
+  $('btnCancel').style.display = 'inline-block';
+
+  const limitMB = Math.max(10, Number($('maxMB').value) || 500);
+  const exportStamp = tsStamp(Date.now());
+  const batcher = new ZipBatcher(limitMB * MB, `fiverr-orders-${exportStamp}`);
+  const report = { started: fmtTime(Date.now()), total: selected.length, formats: fmts, ok: [], failed: [], filesFailed: [], filesSkipped: 0 };
+
+  log(`Starting export of ${selected.length} orders (parts capped at ${limitMB} MB)…`);
+
+  for (let i = 0; i < selected.length; i++) {
+    if (cancelled) { log('Cancelled — saving what has been collected so far.', 'log-warn'); break; }
+    const o = selected[i];
+    setProgress(i, selected.length, o.orderId);
+    try {
+      const { page, details } = await fetchOrderData(o.orderId);
+      const files = (o.analysis && orderCache.has(o.orderId)) ? o.analysis.files : indexOrderFiles(o.orderId, page);
+      const folder = `${dateOnly(orderFolderTs(o))}_${sanitize(o.orderId)}_${sanitize(o.buyer)}`;
+      const fileStates = new Map();
+      let fileCount = 0;
+
+      for (const f of files) {
+        if (cancelled) break;
+        if (!(o._att !== false && !deselectedAtt.has(f.id) && f.url)) {
+          fileStates.set(f.id, { included: false });
+          report.filesSkipped++;
+          continue;
+        }
+        try {
+          const blob = await fetchAttachmentBlob(f.url);
+          await batcher.add(`${folder}/attachments/${f.zipName}`, blob, { size: blob.size, date: new Date(toMs(f.ts)) });
+          fileStates.set(f.id, { included: true });
+          fileCount++;
+          stats.att++;
+        } catch (e) {
+          fileStates.set(f.id, { included: true, error: e.message });
+          report.filesFailed.push({ orderId: o.orderId, file: f.name, url: f.url, error: e.message });
+          log(`  ⚠ file failed (${o.orderId} / ${f.name}): ${e.message}`, 'log-warn');
+        }
+      }
+
+      const ts = orderFolderTs(o);
+      const base = `${dateOnly(ts)}_${sanitize(o.orderId)}`;
+      if (fmts.md) {
+        const md = buildOrderMarkdown(o, page, details, files, fileStates);
+        await batcher.add(`${folder}/${base}.md`, md, { size: new Blob([md]).size, compress: true, date: new Date(ts) });
+      }
+      if (fmts.html) {
+        const html = buildOrderHtml(o, page, details, files, fileStates);
+        await batcher.add(`${folder}/${base}.html`, html, { size: new Blob([html]).size, compress: true, date: new Date(ts) });
+      }
+      if (fmts.json) {
+        const json = JSON.stringify({ summary: o, details, page }, null, 2);
+        await batcher.add(`${folder}/${base}.json`, json, { size: new Blob([json]).size, compress: true, date: new Date(ts) });
+      }
+
+      stats.done++;
+      report.ok.push(o.orderId);
+      log(`✔ ${o.orderId} (${o.buyer}) — ${fileCount} files`, 'log-ok');
+    } catch (e) {
+      if (e.message === 'cancelled') { log('Cancelled — saving what has been collected so far.', 'log-warn'); break; }
+      stats.fail++;
+      report.failed.push({ orderId: o.orderId, error: e.message });
+      log(`✘ ${o.orderId} — ${e.message}`, 'log-err');
+    }
+    updateStats(batcher.size);
+    await sleep(400);
+  }
+
+  report.finished = fmtTime(Date.now());
+  try {
+    const rep = JSON.stringify(report, null, 2);
+    await batcher.add(`_export-report.json`, rep, { size: rep.length, compress: true });
+    await batcher.flush();
+  } catch (e) {
+    log(`Error saving final ZIP: ${e.message}`, 'log-err');
+  }
+
+  setProgress(selected.length, selected.length, 'finished');
+  log(`Order export finished. ${stats.done} ok, ${stats.fail} failed, ${stats.att} files, ${stats.parts} ZIP part(s). Details in _export-report.json inside the last ZIP.`, 'log-ok');
+
+  running = false;
+  $('btnAnalyzeOrders').disabled = false;
+  $('btnFetchOrders').disabled = false;
+  updateExportButton();
+  $('btnCancel').style.display = 'none';
+}
+
+/* ==================================================================
+ *                          TABS + WIRING
+ * ================================================================== */
+
+let activeTab = 'messages';
+
+function setTab(tab) {
+  activeTab = tab;
+  $('paneMessages').classList.toggle('active', tab === 'messages');
+  $('paneOrders').classList.toggle('active', tab === 'orders');
+  $('tabMessages').classList.toggle('active', tab === 'messages');
+  $('tabOrders').classList.toggle('active', tab === 'orders');
+  $('tabMessages').setAttribute('aria-selected', tab === 'messages');
+  $('tabOrders').setAttribute('aria-selected', tab === 'orders');
+  $('btnExport').textContent = tab === 'messages' ? 'Export chats' : 'Export orders';
+  updateExportButton();
+}
+
+function updateExportButton() {
+  if (running) return;
+  $('btnExport').disabled = activeTab === 'messages' ? contacts.length === 0 : orders.length === 0;
+}
+
 // ---------- wiring ----------
+// tabs
+$('tabMessages').addEventListener('click', () => setTab('messages'));
+$('tabOrders').addEventListener('click', () => setTab('orders'));
+
+// messages
 $('btnFetchContacts').addEventListener('click', fetchAllContacts);
 $('btnAnalyze').addEventListener('click', runAnalyze);
-$('btnExport').addEventListener('click', runExport);
-$('btnCancel').addEventListener('click', () => { cancelled = true; $('btnCancel').disabled = true; setTimeout(() => $('btnCancel').disabled = false, 3000); });
 $('btnSelAll').addEventListener('click', () => { contacts.forEach(c => c._sel = true); renderContacts(); persistContacts(); });
 $('btnSelNone').addEventListener('click', () => { contacts.forEach(c => c._sel = false); renderContacts(); persistContacts(); });
-$('btnAttAll').addEventListener('click', () => { contacts.forEach(c => c._att = true); deselectedAtt.clear(); renderContacts(); persistContacts(); });
+$('btnAttAll').addEventListener('click', () => { contacts.forEach(c => c._att = true); contacts.forEach(c => (c.analysis?.atts || []).forEach(a => deselectedAtt.delete(a.id))); renderContacts(); persistContacts(); });
 $('btnAttNone').addEventListener('click', () => { contacts.forEach(c => c._att = false); renderContacts(); persistContacts(); });
 $('filter').addEventListener('input', renderContacts);
-document.querySelectorAll('.thead .sortable').forEach(el => {
+document.querySelectorAll('#theadMessages .sortable').forEach(el => {
   el.addEventListener('click', () => {
     const key = el.dataset.key;
     if (sortState.key === key) {
@@ -800,14 +1512,38 @@ document.querySelectorAll('.thead .sortable').forEach(el => {
     renderContacts();
   });
 });
-['fmtMd', 'fmtHtml', 'fmtJson', 'maxMB'].forEach(id => $(id).addEventListener('change', refreshSummary));
+
+// orders
+$('btnFetchOrders').addEventListener('click', fetchAllOrders);
+$('btnAnalyzeOrders').addEventListener('click', runAnalyzeOrders);
+$('btnOSelAll').addEventListener('click', () => { orders.forEach(o => o._sel = true); renderOrders(); persistOrders(); });
+$('btnOSelNone').addEventListener('click', () => { orders.forEach(o => o._sel = false); renderOrders(); persistOrders(); });
+$('btnOAttAll').addEventListener('click', () => { orders.forEach(o => o._att = true); orders.forEach(o => (o.analysis?.files || []).forEach(f => deselectedAtt.delete(f.id))); renderOrders(); persistOrders(); });
+$('btnOAttNone').addEventListener('click', () => { orders.forEach(o => o._att = false); renderOrders(); persistOrders(); });
+$('orderSearch').addEventListener('input', renderOrders);
+document.querySelectorAll('#theadOrders .sortable').forEach(el => {
+  el.addEventListener('click', () => {
+    const key = el.dataset.key;
+    if (orderSort.key === key) {
+      orderSort.dir = orderSort.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+      orderSort = { key, dir: key === 'buyer' ? 'asc' : 'desc' };
+    }
+    renderOrders();
+  });
+});
+
+// shared
+$('btnExport').addEventListener('click', () => activeTab === 'messages' ? runExport() : runExportOrders());
+$('btnCancel').addEventListener('click', () => { cancelled = true; $('btnCancel').disabled = true; setTimeout(() => $('btnCancel').disabled = false, 3000); });
+['fmtMd', 'fmtHtml', 'fmtJson', 'maxMB'].forEach(id => $(id).addEventListener('change', () => { refreshSummary(); refreshOrderSummary(); }));
 
 window.addEventListener('beforeunload', (e) => {
   if (running) { e.preventDefault(); e.returnValue = ''; }
 });
 
-// restore previous session (contact list + analysis summaries + deselections)
-chrome.storage.local.get(['batchExportContacts', 'batchExportDeselected'], res => {
+// restore previous session (lists + analysis summaries + deselections)
+chrome.storage.local.get(['batchExportContacts', 'batchExportOrders', 'batchExportDeselected'], res => {
   if (Array.isArray(res.batchExportDeselected)) {
     res.batchExportDeselected.forEach(id => deselectedAtt.add(id));
   }
@@ -824,5 +1560,17 @@ chrome.storage.local.get(['batchExportContacts', 'batchExportDeselected'], res =
     }
     renderContacts();
     $('contactStatus').textContent = `Restored ${contacts.length} contacts from the previous session. Re-fetch if outdated.`;
+  }
+  if (Array.isArray(res.batchExportOrders) && res.batchExportOrders.length) {
+    orders = res.batchExportOrders;
+    for (const o of orders) {
+      if (o.analysis && o.analysis.files) {
+        for (const f of o.analysis.files) {
+          if (f.url === undefined) f.url = f.hasUrl ? true : null;
+        }
+      }
+    }
+    renderOrders();
+    $('orderStatus').textContent = `Restored ${orders.length} orders from the previous session. Re-fetch if outdated.`;
   }
 });

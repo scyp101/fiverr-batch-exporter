@@ -1,6 +1,6 @@
 # Fiverr Batch Exporter
 
-**Back up your entire Fiverr inbox — every conversation and every attachment — as a handful of ZIP downloads instead of thousands of individual files.**
+**Back up your entire Fiverr business — every conversation, every order, every attachment — as a handful of ZIP downloads instead of thousands of individual files.**
 
 ![Platform](https://img.shields.io/badge/platform-Chrome%20%7C%20Edge%20%7C%20Brave-4c8bf5)
 ![Manifest](https://img.shields.io/badge/manifest-v3-1dbf73)
@@ -11,6 +11,7 @@ Existing Fiverr export tools trigger one browser download *per file* — for a 6
 ## Features
 
 - 📦 **Batched ZIP downloads** — the whole inbox lands in a few ZIPs, not thousands of files
+- 🧾 **Orders too** — a second tab exports your seller orders: full timeline (placed → deliveries → revisions → completed), delivery messages and files, revision requests with reference attachments, buyer reviews with rating breakdowns, tags and your replies, plus earnings after fees and tips
 - 🔍 **Analyze before you download** — a metadata-only pass shows message counts, attachment counts, and the exact download size per conversation *and* in total, before a single byte of attachments is fetched
 - ✅ **Granular selection** — pick conversations, toggle attachments per chat, or untick individual files from an expandable per-chat file list
 - 📝 **Choose your formats** — Markdown, HTML (styled chat view), and/or raw JSON; only what you tick gets exported
@@ -41,6 +42,14 @@ Existing Fiverr export tools trigger one browser download *per file* — for a 6
 
 Because analysis already fetched the messages, the export step only has to download attachments — analyzed chats export noticeably faster.
 
+### Orders tab
+
+The **Orders** tab follows the same three steps for your seller orders:
+
+1. **Fetch orders** — pick a status (Completed, Active, Delivered, Cancelled, Starred) and fetch. Fetch again with another status to merge more orders into the list.
+2. **Analyze** — reads each order's timeline and file metadata; shows per-order file sizes plus totals including **earnings after fees** across the selection.
+3. **Export** — produces one folder per order with a full timeline transcript (deliveries, revision requests, review + tags + your reply) and all delivery/revision files, timestamp-prefixed.
+
 ## Output structure
 
 ```
@@ -55,6 +64,14 @@ fiverr-export-2026-07-08_15-30-00-part01.zip
 ├── 2025-05-20_otherclient/
 │   └── …
 └── _export-report.json                          ← summary + failed items (in the last part)
+
+fiverr-orders-2026-07-08_16-10-00-part01.zip
+├── 2025-06-14_FO51BE0C7BF83_clientname/
+│   ├── 2025-06-14_FO51BE0C7BF83.md              ← order facts, earnings, line items, timeline
+│   └── attachments/
+│       ├── 2025-06-10_09-15-30_delivery.stl     ← delivery + revision files, prefixed with
+│       └── 2025-06-12_11-02-11_reference.png       the timestamp of their event
+└── _export-report.json
 ```
 
 File modification times inside the ZIPs are set to the original message timestamps. Failed attachment downloads are flagged in the transcript and listed with their URLs in `_export-report.json` so you can retry them manually.
