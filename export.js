@@ -1538,6 +1538,29 @@ $('btnExport').addEventListener('click', () => activeTab === 'messages' ? runExp
 $('btnCancel').addEventListener('click', () => { cancelled = true; $('btnCancel').disabled = true; setTimeout(() => $('btnCancel').disabled = false, 3000); });
 ['fmtMd', 'fmtHtml', 'fmtJson', 'maxMB'].forEach(id => $(id).addEventListener('change', () => { refreshSummary(); refreshOrderSummary(); }));
 
+// part-limit stepper
+function stepMB(delta) {
+  const el = $('maxMB');
+  const cur = Number(el.value) || 500;
+  el.value = Math.min(1900, Math.max(10, cur + delta));
+  refreshSummary();
+  refreshOrderSummary();
+}
+$('mbMinus').addEventListener('click', () => stepMB(-50));
+$('mbPlus').addEventListener('click', () => stepMB(50));
+
+// theme toggle (dark is the default)
+function applyTheme(theme) {
+  if (theme === 'light') document.documentElement.dataset.theme = 'light';
+  else delete document.documentElement.dataset.theme;
+}
+$('themeToggle').addEventListener('click', () => {
+  const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+  applyTheme(next);
+  chrome.storage.local.set({ uiTheme: next });
+});
+chrome.storage.local.get(['uiTheme'], res => applyTheme(res.uiTheme));
+
 window.addEventListener('beforeunload', (e) => {
   if (running) { e.preventDefault(); e.returnValue = ''; }
 });
