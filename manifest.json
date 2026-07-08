@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Fiverr Batch Exporter",
+  "version": "1.1.0",
+  "description": "Back up all Fiverr conversations as Markdown/HTML/JSON plus attachments, bundled into a few size-capped ZIP downloads.",
+  "permissions": [
+    "downloads",
+    "scripting",
+    "tabs",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://www.fiverr.com/*",
+    "https://*/*"
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  }
+}

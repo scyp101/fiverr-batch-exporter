@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Fiverr Batch Exporter</title>
+  <style>
+    :root {
+      --bg: #0f1318;
+      --surface: #171d24;
+      --surface-2: #1d2530;
+      --border: #262f3a;
+      --border-soft: #202935;
+      --text: #e6ebf0;
+      --muted: #8a97a5;
+      --faint: #5c6875;
+      --accent: #1dbf73;
+      --accent-soft: rgba(29, 191, 115, 0.12);
+      --warn: #e3a63c;
+      --error: #e06355;
+      --mono: "Cascadia Mono", Consolas, "SF Mono", monospace;
+    }
+    * { box-sizing: border-box; }
+    html { scrollbar-color: #303c4a var(--bg); }
+    body {
+      font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+      margin: 0; background: var(--bg); color: var(--text);
+      font-size: 14px; line-height: 1.5;
+    }
+    .wrap { max-width: 1020px; margin: 0 auto; padding: 28px 24px 64px; }
+
+    /* ---------- header ---------- */
+    header { display: flex; align-items: center; gap: 14px; margin-bottom: 6px; }
+    .mark {
+      width: 40px; height: 40px; border-radius: 10px; flex: none;
+      background: linear-gradient(135deg, #1dbf73, #12915a);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .mark svg { width: 22px; height: 22px; }
+    h1 { font-size: 19px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+    .tagline { color: var(--muted); font-size: 13px; margin: 0 0 22px 54px; }
+    .ver { color: var(--faint); font-size: 12px; font-family: var(--mono); font-weight: 400; margin-left: 8px; }
+
+    .notice {
+      background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--warn);
+      color: var(--muted); padding: 10px 16px; border-radius: 8px; font-size: 13px; margin-bottom: 22px;
+    }
+    .notice b { color: var(--text); font-weight: 600; }
+
+    /* ---------- step cards ---------- */
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; margin-bottom: 18px; }
+    .card-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
+    .step-no {
+      font-family: var(--mono); font-size: 12px; color: var(--accent);
+      border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; background: var(--accent-soft);
+    }
+    .card h2 { font-size: 15px; font-weight: 600; margin: 0; }
+    .card-hint { color: var(--muted); font-size: 12.5px; margin-left: auto; }
+
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+    button {
+      padding: 8px 16px; background: var(--accent); color: #08110c; border: none; border-radius: 7px;
+      font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit;
+    }
+    button:hover:not(:disabled) { background: #24d381; }
+    button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    button:disabled { background: var(--surface-2); color: var(--faint); cursor: not-allowed; }
+    button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); font-weight: 500; }
+    button.ghost:hover:not(:disabled) { color: var(--text); border-color: #35414f; background: var(--surface-2); }
+    button.danger { background: var(--error); color: #fff; }
+    button.danger:hover:not(:disabled) { background: #e97a6e; }
+
+    input[type="number"], input[type="text"] {
+      padding: 7px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+      color: var(--text); font-family: inherit; font-size: 13px;
+    }
+    input[type="number"] { width: 76px; font-family: var(--mono); }
+    input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+    label { font-size: 13px; color: var(--muted); display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
+
+    .status { font-size: 12.5px; color: var(--muted); margin-top: 10px; min-height: 18px; font-family: var(--mono); }
+    .status.err { color: var(--error); }
+
+    /* ---------- contact table ---------- */
+    .table-tools { display: flex; gap: 8px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+    .table-tools input[type="text"] { width: 210px; }
+    .count-chip { font-size: 12px; color: var(--muted); font-family: var(--mono); margin-left: auto; }
+
+    #tableWrap { display: none; margin-top: 10px; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
+    .thead, .trow {
+      display: grid; align-items: center;
+      grid-template-columns: 38px minmax(140px, 1fr) 150px 90px 170px 110px 36px;
+      gap: 8px; padding: 0 12px;
+    }
+    .thead {
+      background: var(--surface-2); color: var(--faint); font-size: 11px; text-transform: uppercase;
+      letter-spacing: 0.07em; height: 34px; border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 2;
+    }
+    #tbody { max-height: 380px; overflow-y: auto; background: var(--bg); }
+    .trow { min-height: 42px; border-bottom: 1px solid var(--border-soft); font-size: 13px; }
+    .trow:hover { background: var(--surface-2); }
+    .cell-user { overflow: hidden; }
+    .uname { font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .num { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12.5px; }
+    .num.has { color: var(--text); }
+    .attsize { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--muted); }
+    .attsize .n { color: var(--faint); }
+    .expander {
+      background: none; border: none; color: var(--faint); cursor: pointer; padding: 4px;
+      font-size: 11px; transition: transform .15s;
+    }
+    .expander:hover { color: var(--text); background: none; }
+    .expander.open { transform: rotate(90deg); }
+    .expander:disabled { opacity: 0.25; cursor: default; }
+
+    .attlist { background: #0c0f14; border-bottom: 1px solid var(--border-soft); padding: 6px 12px 10px 46px; display: none; }
+    .attlist.open { display: block; }
+    .attitem { display: flex; align-items: center; gap: 10px; padding: 3px 0; font-size: 12.5px; }
+    .attitem .aname { font-family: var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+    .attitem .asize { font-family: var(--mono); color: var(--faint); flex: none; }
+    .attitem.off .aname { text-decoration: line-through; color: var(--faint); }
+
+    /* ---------- stat tiles ---------- */
+    .tiles { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 14px; }
+    .tile { background: var(--bg); border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px; }
+    .tile .k { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 4px; }
+    .tile .v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 17px; font-weight: 600; }
+    .tile .v small { font-size: 12px; color: var(--muted); font-weight: 400; }
+    .tile.accent .v { color: var(--accent); }
+    .tiles-note { font-size: 12px; color: var(--faint); margin-top: 8px; }
+
+    /* ---------- export controls ---------- */
+    .opts { display: flex; gap: 22px; align-items: center; flex-wrap: wrap; padding: 12px 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 9px; }
+    .opts .group { display: flex; gap: 14px; align-items: center; }
+    .opts .glabel { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.07em; }
+
+    .progressOuter { background: var(--bg); border: 1px solid var(--border); border-radius: 7px; height: 24px; overflow: hidden; margin-top: 14px; position: relative; }
+    .progressInner { background: linear-gradient(90deg, #16a565, var(--accent)); height: 100%; width: 0%; transition: width .3s; }
+    .progressText { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; font-family: var(--mono); }
+
+    .stats { display: flex; gap: 22px; margin-top: 10px; font-size: 12.5px; color: var(--muted); font-family: var(--mono); flex-wrap: wrap; }
+    .stats b { color: var(--text); font-weight: 600; }
+
+    #log {
+      background: #0b0e12; border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px;
+      margin-top: 14px; height: 240px; overflow-y: auto; font-family: var(--mono); font-size: 12px;
+      white-space: pre-wrap; line-height: 1.65; color: var(--muted);
+    }
+    .log-err { color: var(--error); }
+    .log-ok { color: var(--accent); }
+    .log-warn { color: var(--warn); }
+
+    footer { color: var(--faint); font-size: 12px; margin-top: 28px; text-align: center; }
+    footer a { color: var(--muted); }
+
+    @media (prefers-reduced-motion: reduce) {
+      * { transition: none !important; }
+    }
+    @media (max-width: 760px) {
+      .tiles { grid-template-columns: repeat(2, 1fr); }
+      .thead, .trow { grid-template-columns: 32px 1fr 90px 110px 36px; }
+      .col-hide { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v10"/><path d="m7 9 5 5 5-5"/><path d="M4 19h16"/>
+        </svg>
+      </div>
+      <h1>Fiverr Batch Exporter <span class="ver" id="ver"></span></h1>
+    </header>
+    <p class="tagline">Back up every conversation and attachment as a handful of ZIP downloads — not thousands.</p>
+
+    <div class="notice"><b>Keep this tab open</b> during analysis and export. Be logged in to Fiverr in this browser. For a hands-off run, disable "Ask where to save each file" in Chrome's download settings.</div>
+
+    <!-- STEP 1 -->
+    <section class="card">
+      <div class="card-head">
+        <span class="step-no">1</span>
+        <h2>Load contacts</h2>
+        <span class="card-hint">Fetches your full inbox contact list</span>
+      </div>
+      <div class="row">
+        <button id="btnFetchContacts">Fetch all contacts</button>
+      </div>
+      <div class="status" id="contactStatus"></div>
+
+      <div class="table-tools" id="tableTools" style="display:none">
+        <button class="ghost" id="btnSelAll">Select all</button>
+        <button class="ghost" id="btnSelNone">Select none</button>
+        <button class="ghost" id="btnAttAll">Attachments on</button>
+        <button class="ghost" id="btnAttNone">Attachments off</button>
+        <input type="text" id="filter" placeholder="Filter by username…">
+        <span class="count-chip" id="selCount"></span>
+      </div>
+
+      <div id="tableWrap">
+        <div class="thead">
+          <span></span>
+          <span>Contact</span>
+          <span class="col-hide">Last activity</span>
+          <span>Msgs</span>
+          <span>Attachments</span>
+          <span class="col-hide">Include files</span>
+          <span></span>
+        </div>
+        <div id="tbody"></div>
+      </div>
+    </section>
+
+    <!-- STEP 2 -->
+    <section class="card">
+      <div class="card-head">
+        <span class="step-no">2</span>
+        <h2>Analyze size <span style="color:var(--faint);font-weight:400">(recommended)</span></h2>
+        <span class="card-hint">Reads every selected chat's metadata — no files downloaded yet</span>
+      </div>
+      <div class="row">
+        <button id="btnAnalyze" disabled>Analyze selected chats</button>
+        <span class="status" id="analyzeStatus" style="margin:0"></span>
+      </div>
+      <div class="tiles" id="tiles" style="display:none">
+        <div class="tile"><div class="k">Chats selected</div><div class="v" id="tChats">–</div></div>
+        <div class="tile"><div class="k">Messages</div><div class="v" id="tMsgs">–</div></div>
+        <div class="tile"><div class="k">Attachments</div><div class="v" id="tAtts">–</div></div>
+        <div class="tile"><div class="k">Attachment size</div><div class="v" id="tAttSize">–</div></div>
+        <div class="tile accent"><div class="k">Est. export · parts</div><div class="v" id="tTotal">–</div></div>
+      </div>
+      <div class="tiles-note" id="tilesNote" style="display:none"></div>
+    </section>
+
+    <!-- STEP 3 -->
+    <section class="card">
+      <div class="card-head">
+        <span class="step-no">3</span>
+        <h2>Export</h2>
+        <span class="card-hint">One browser download per ZIP part</span>
+      </div>
+      <div class="opts">
+        <div class="group">
+          <span class="glabel">Formats</span>
+          <label><input type="checkbox" id="fmtMd" checked> Markdown</label>
+          <label><input type="checkbox" id="fmtHtml"> HTML</label>
+          <label><input type="checkbox" id="fmtJson"> JSON</label>
+        </div>
+        <div class="group">
+          <span class="glabel">Part limit</span>
+          <label><input type="number" id="maxMB" value="500" min="10" max="1900"> MB</label>
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <button id="btnExport" disabled>Start export</button>
+        <button id="btnCancel" class="danger" style="display:none">Cancel — keep what's done</button>
+      </div>
+      <div class="progressOuter"><div class="progressInner" id="pbar"></div><div class="progressText" id="ptext"></div></div>
+      <div class="stats">
+        <span>Done <b id="stDone">0</b></span>
+        <span>Failed <b id="stFail">0</b></span>
+        <span>Attachments <b id="stAtt">0</b></span>
+        <span>ZIP parts <b id="stParts">0</b></span>
+        <span>Current part <b id="stSize">0 MB</b></span>
+      </div>
+      <div id="log" aria-live="polite"></div>
+    </section>
+
+    <footer>Runs entirely in your browser — conversations and files never leave your machine.</footer>
+  </div>
+  <script src="jszip.min.js"></script>
+  <script src="export.js"></script>
+</body>
+</html>
