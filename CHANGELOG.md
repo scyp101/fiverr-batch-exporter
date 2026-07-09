@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1 — 2026-07-09
+
+- No functional changes. Version bump because the `v1.2.0` tag was consumed by an immutable release in a prior incarnation of this repository and cannot be reused.
+
 ## 1.2.0 — 2026-07-09
 
 ### Added
