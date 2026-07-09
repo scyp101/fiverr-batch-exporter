@@ -135,8 +135,10 @@ async function fiverrJson(url, retries = 2) {
     try {
       const r = await fetch(url, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
       if (r.ok) return await r.json();
-      if (r.status === 429) { await sleep(5000 * (attempt + 1)); if (attempt < retries) continue; }
-      if (r.status === 401 || r.status === 403) return await fetchViaTab(url);
+      if (r.status === 401 || r.status === 403 || r.status === 429) {
+        try { return await fetchViaTab(url); } catch (e) { /* also blocked — cool down */ }
+        if (attempt < retries) { await cancellableSleep(12000 * (attempt + 1)); continue; }
+      }
       throw new Error(`HTTP ${r.status} ${r.statusText}`);
     } catch (e) {
       if (attempt < retries) { await sleep(1500 * (attempt + 1)); continue; }
@@ -145,34 +147,54 @@ async function fiverrJson(url, retries = 2) {
   }
 }
 
-// Fetch a fiverr.com page as text (order pages), with fiverr-tab fallback.
-async function fiverrText(url, retries = 2) {
+// Fetch a fiverr.com page as text through an open fiverr tab (real page context —
+// often passes bot checks that block extension-context requests).
+async function fetchTextViaTab(url) {
+  const tabs = await chrome.tabs.query({ url: 'https://www.fiverr.com/*' });
+  if (!tabs.length) throw new Error('no fiverr.com tab open');
+  const res = await chrome.scripting.executeScript({
+    target: { tabId: tabs[0].id },
+    func: async (u) => {
+      try {
+        const r = await fetch(u, { credentials: 'include' });
+        if (!r.ok) return { __err: `HTTP ${r.status} ${r.statusText}` };
+        return { __text: await r.text() };
+      } catch (err) { return { __err: err.message }; }
+    },
+    args: [url]
+  });
+  const out = res && res[0] && res[0].result;
+  if (!out || out.__err) throw new Error((out && out.__err) || 'fetch via tab failed');
+  return out.__text;
+}
+
+// Fetch a fiverr.com page as text (order pages). Fiverr's bot protection answers
+// bursts of page loads with HTTP 403 for ~30-60s, so 403/429 get long cooldowns
+// (with a via-tab attempt first) instead of fast retries.
+async function fiverrText(url, retries = 3) {
   for (let attempt = 0; ; attempt++) {
+    if (cancelled) throw new Error('cancelled');
     try {
       const r = await fetch(url, { credentials: 'include' });
       if (r.ok) return await r.text();
-      if (r.status === 429) { await sleep(5000 * (attempt + 1)); if (attempt < retries) continue; }
+      if (r.status === 403 || r.status === 429) {
+        try { return await fetchTextViaTab(url); } catch (e) { /* also blocked — cool down */ }
+        if (attempt < retries) { await cancellableSleep(15000 * (attempt + 1)); continue; }
+      }
       throw new Error(`HTTP ${r.status} ${r.statusText}`);
     } catch (e) {
-      if (attempt < retries) { await sleep(1500 * (attempt + 1)); continue; }
-      // last resort: read through an open fiverr tab
-      const tabs = await chrome.tabs.query({ url: 'https://www.fiverr.com/*' });
-      if (!tabs.length) throw e;
-      const res = await chrome.scripting.executeScript({
-        target: { tabId: tabs[0].id },
-        func: async (u) => {
-          try {
-            const r = await fetch(u, { credentials: 'include' });
-            if (!r.ok) return { __err: `HTTP ${r.status} ${r.statusText}` };
-            return { __text: await r.text() };
-          } catch (err) { return { __err: err.message }; }
-        },
-        args: [url]
-      });
-      const out = res && res[0] && res[0].result;
-      if (!out || out.__err) throw new Error((out && out.__err) || e.message);
-      return out.__text;
+      if (e.message === 'cancelled') throw e;
+      if (attempt < retries) { await cancellableSleep(2000 * (attempt + 1)); continue; }
+      try { return await fetchTextViaTab(url); } catch (e2) { throw e; }
     }
+  }
+}
+
+async function cancellableSleep(ms) {
+  const step = 500;
+  for (let t = 0; t < ms; t += step) {
+    if (cancelled) throw new Error('cancelled');
+    await sleep(Math.min(step, ms - t));
   }
 }
 
@@ -246,6 +268,7 @@ function attIncluded(contact, entry) {
 // ---------- contacts ----------
 async function fetchAllContacts() {
   if (running) return;
+  cancelled = false;
   const btn = $('btnFetchContacts');
   btn.disabled = true;
   $('contactStatus').textContent = 'Fetching contacts…';
@@ -832,6 +855,7 @@ async function fetchOrdersPage(filter, cursor) {
 
 async function fetchAllOrders() {
   if (running) return;
+  cancelled = false;
   const btn = $('btnFetchOrders');
   const filter = $('orderFilter').value;
   btn.disabled = true;
@@ -1315,36 +1339,46 @@ async function runAnalyzeOrders() {
   $('btnCancel').style.display = 'inline-block';
   log(`Analyzing ${selected.length} orders (metadata only — no files are downloaded)…`);
 
-  let done = 0, failed = 0;
-  for (let i = 0; i < selected.length; i++) {
-    if (cancelled) { log('Analysis cancelled.', 'log-warn'); break; }
-    const o = selected[i];
-    setProgress(i, selected.length, `analyzing ${o.orderId}`);
-    if (o.analysis && orderCache.has(o.orderId)) { done++; continue; }
-    try {
-      const { page, details } = await fetchOrderData(o.orderId);
-      const files = indexOrderFiles(o.orderId, page);
-      const fileStates = new Map(files.map(f => [f.id, { included: true }]));
-      const md = buildOrderMarkdown(o, page, details, files, fileStates);
-      const html = buildOrderHtml(o, page, details, files, fileStates);
-      const json = JSON.stringify({ summary: o, details, page }, null, 2);
-      o.analysis = {
-        files,
-        earned: page.earnings && page.earnings.amount != null ? page.earnings.amount : null,
-        activityCount: (page.activities || []).length,
-        completedTs: page.completedAt || null,
-        textSizes: { md: new Blob([md]).size, html: new Blob([html]).size, json: new Blob([json]).size }
-      };
-      done++;
-      const fs = files.reduce((s, f) => s + f.size, 0);
-      log(`· ${o.orderId} (${o.buyer}) — ${(page.activities || []).length} events, ${files.length} files (${fmtSize(fs)})`);
-    } catch (e) {
-      if (e.message === 'cancelled') { log('Analysis cancelled.', 'log-warn'); break; }
-      failed++;
-      log(`✘ analyze failed: ${o.orderId} — ${e.message}`, 'log-err');
+  let done = 0;
+  let queue = selected.slice();
+  for (let pass = 1; pass <= 2 && queue.length && !cancelled; pass++) {
+    if (pass === 2) {
+      log(`Cooling down 60 s, then retrying ${queue.length} rate-limited order(s)…`, 'log-warn');
+      try { await cancellableSleep(60000); } catch (e) { break; }
     }
-    await sleep(400);
+    const failedThisPass = [];
+    for (let i = 0; i < queue.length; i++) {
+      if (cancelled) { log('Analysis cancelled.', 'log-warn'); break; }
+      const o = queue[i];
+      setProgress(i, queue.length, `analyzing ${o.orderId}${pass > 1 ? ' (retry)' : ''}`);
+      if (o.analysis && orderCache.has(o.orderId)) { done++; continue; }
+      try {
+        const { page, details } = await fetchOrderData(o.orderId);
+        const files = indexOrderFiles(o.orderId, page);
+        const fileStates = new Map(files.map(f => [f.id, { included: true }]));
+        const md = buildOrderMarkdown(o, page, details, files, fileStates);
+        const html = buildOrderHtml(o, page, details, files, fileStates);
+        const json = JSON.stringify({ summary: o, details, page }, null, 2);
+        o.analysis = {
+          files,
+          earned: page.earnings && page.earnings.amount != null ? page.earnings.amount : null,
+          activityCount: (page.activities || []).length,
+          completedTs: page.completedAt || null,
+          textSizes: { md: new Blob([md]).size, html: new Blob([html]).size, json: new Blob([json]).size }
+        };
+        done++;
+        const fs = files.reduce((s, f) => s + f.size, 0);
+        log(`· ${o.orderId} (${o.buyer}) — ${(page.activities || []).length} events, ${files.length} files (${fmtSize(fs)})`);
+      } catch (e) {
+        if (e.message === 'cancelled') { log('Analysis cancelled.', 'log-warn'); break; }
+        failedThisPass.push(o);
+        log(`✘ analyze failed: ${o.orderId} — ${e.message}${pass === 1 ? ' (will retry after cooldown)' : ''}`, 'log-err');
+      }
+      await sleep(1000);
+    }
+    queue = failedThisPass;
   }
+  const failed = queue.length;
 
   setProgress(selected.length, selected.length, 'analysis complete');
   log(`Order analysis finished: ${done} analyzed, ${failed} failed.`, failed ? 'log-warn' : 'log-ok');
