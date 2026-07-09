@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.2 — 2026-07-09
+
+### Fixed
+- Order analysis no longer fails when Fiverr's bot protection rate-limits bursts of order-page loads (HTTP 403). Blocked requests are first retried through an open fiverr.com tab, then after 15–45s cooldowns; failed orders automatically get a second pass after a 60s cooldown. Order analysis now paces at ~1 request/second.
+
 ## 1.2.1 — 2026-07-09
 
 - No functional changes. Version bump because the `v1.2.0` tag was consumed by an immutable release in a prior incarnation of this repository and cannot be reused.
