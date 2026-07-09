@@ -9,6 +9,18 @@
 
 Most Fiverr export tools trigger one browser download *per file*. For an inbox with hundreds of chats that means thousands of download prompts — practically unusable. Fiverr Batch Exporter builds everything into in-memory ZIP archives and triggers **one download per ZIP part**, splitting parts automatically at a configurable size limit (default **500 MB**).
 
+![Messages tab, dark theme](screenshots/messages-dark.jpg)
+
+<details>
+<summary><b>More screenshots</b> — Orders tab, light theme</summary>
+
+| | |
+|---|---|
+| ![Orders tab, dark theme](screenshots/orders-dark.jpg) | ![Orders tab, light theme](screenshots/orders-light.jpg) |
+| ![Messages tab, light theme](screenshots/messages-light.jpg) | |
+
+</details>
+
 ## Highlights
 
 | | |
