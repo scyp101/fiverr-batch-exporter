@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.3 — 2026-07-15
+
+### Fixed
+- Messages sent by a seller's Fiverr AI assistant (e.g. "Ryn") were attributed to the seller in Markdown/HTML transcripts. They are now detected via `senderData.isPersonalAssistant` and labelled with the assistant's name — auto-detected from conversation metadata when available, with a manual fallback field in the export options. Assistant messages get a dashed border in HTML transcripts; raw JSON output is unchanged.
+
 ## 1.2.2 — 2026-07-09
 
 ### Fixed

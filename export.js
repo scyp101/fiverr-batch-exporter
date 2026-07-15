@@ -213,18 +213,22 @@ async function fetchAttachmentBlob(url, retries = 2) {
 }
 
 // ---------- conversation fetching ----------
+const convMeta = new Map();   // username -> first-page response root (minus messages)
+
 async function fetchConversation(username) {
   if (convCache.has(username)) return convCache.get(username);
   let all = [];
   let lastPage = false;
   let timestamp = null;
   let guard = 0;
+  let meta = null;
   while (!lastPage && guard++ < 500) {
     if (cancelled) throw new Error('cancelled');
     const url = timestamp
       ? `https://www.fiverr.com/inbox/contacts/${encodeURIComponent(username)}/conversation?timestamp=${timestamp}`
       : `https://www.fiverr.com/inbox/contacts/${encodeURIComponent(username)}/conversation`;
     const data = await fiverrJson(url);
+    if (!meta) { meta = { ...data }; delete meta.messages; }
     const msgs = data.messages || [];
     all = all.concat(msgs);
     lastPage = !!data.lastPage || msgs.length === 0;
@@ -233,7 +237,43 @@ async function fetchConversation(username) {
   }
   all.sort((a, b) => Number(a.createdAt) - Number(b.createdAt));
   convCache.set(username, all);
+  convMeta.set(username, meta || {});
   return all;
+}
+
+// ---------- AI-assistant labelling ----------
+// Fiverr flags assistant-sent messages with senderData.isPersonalAssistant
+// while keeping message.sender as the seller's username, so transcripts
+// misattribute them. We relabel those messages. The assistant's display name
+// is auto-detected from the conversation metadata when Fiverr provides it,
+// else taken from the "AI assistant" options field.
+function isAssistantMsg(m) {
+  return !!(m && m.senderData && m.senderData.isPersonalAssistant);
+}
+
+function findAssistantName(obj, depth = 0) {
+  if (!obj || typeof obj !== 'object' || depth > 4) return null;
+  for (const [k, v] of Object.entries(obj)) {
+    if (/assistant/i.test(k) && !/^is/i.test(k)) {
+      if (typeof v === 'string' && v.trim() && v.trim().length <= 40) return v.trim();
+      if (v && typeof v === 'object') {
+        const n = v.name || v.displayName || v.assistantName;
+        if (typeof n === 'string' && n.trim()) return n.trim();
+      }
+    }
+    if (v && typeof v === 'object') {
+      const r = findAssistantName(v, depth + 1);
+      if (r) return r;
+    }
+  }
+  return null;
+}
+
+function assistantLabelFor(username) {
+  const detected = findAssistantName(convMeta.get(username));
+  const manual = $('asstName').value.trim();
+  const name = detected || manual || 'Assistant';
+  return `${name} (AI)`;
 }
 
 // Walks a conversation's messages and produces the attachment manifest:
@@ -535,8 +575,9 @@ async function runAnalyze() {
 
       // measure text formats so the estimate reflects the chosen formats
       const attStates = new Map(atts.map(a => [a.id, { zipName: a.zipName, included: true }]));
-      const md = buildMarkdown(c.username, messages, atts, attStates);
-      const html = buildHtml(c.username, messages, atts, attStates);
+      const asstLabel = assistantLabelFor(c.username);
+      const md = buildMarkdown(c.username, messages, atts, attStates, asstLabel);
+      const html = buildHtml(c.username, messages, atts, attStates, asstLabel);
       const json = JSON.stringify({ username: c.username, messages }, null, 2);
 
       c.analysis = {
@@ -569,18 +610,20 @@ async function runAnalyze() {
 }
 
 // ---------- markdown ----------
-function buildMarkdown(username, messages, atts, attStates) {
+function buildMarkdown(username, messages, atts, attStates, asstLabel) {
   const byAtt = new Map(atts.map(a => [a.att, a]));
+  const senderOf = m => isAssistantMsg(m) ? (asstLabel || 'Assistant (AI)') : (m.sender || 'Unknown');
   let md = `# Conversation with ${username}\n\n`;
   md += `- Messages: ${messages.length}\n`;
   if (messages.length) {
     md += `- First message: ${fmtTime(messages[0].createdAt)}\n`;
     md += `- Last message: ${fmtTime(messages[messages.length - 1].createdAt)}\n`;
   }
+  if (asstLabel && messages.some(isAssistantMsg)) md += `- Includes automated replies sent by ${asstLabel}\n`;
   md += `- Exported: ${fmtTime(Date.now())}\n\n---\n\n`;
 
   for (const m of messages) {
-    md += `### ${m.sender || 'Unknown'} — ${fmtTime(m.createdAt)}\n\n`;
+    md += `### ${senderOf(m)} — ${fmtTime(m.createdAt)}\n\n`;
 
     if (m.repliedToMessage) {
       const r = m.repliedToMessage;
@@ -612,8 +655,9 @@ function buildMarkdown(username, messages, atts, attStates) {
 }
 
 // ---------- html ----------
-function buildHtml(username, messages, atts, attStates) {
+function buildHtml(username, messages, atts, attStates, asstLabel) {
   const byAtt = new Map(atts.map(a => [a.att, a]));
+  const senderOf = m => isAssistantMsg(m) ? (asstLabel || 'Assistant (AI)') : (m.sender || 'Unknown');
   let body = '';
   let currentDate = null;
 
@@ -624,7 +668,7 @@ function buildHtml(username, messages, atts, attStates) {
       currentDate = dayStr;
     }
     const side = m.sender === username ? 'them' : 'me';
-    body += `<div class="msg ${side}"><div class="meta"><b>${escapeHtml(m.sender || 'Unknown')}</b><time>${fmtTime(m.createdAt)}</time></div>`;
+    body += `<div class="msg ${side}${isAssistantMsg(m) ? ' ai' : ''}"><div class="meta"><b>${escapeHtml(senderOf(m))}</b><time>${fmtTime(m.createdAt)}</time></div>`;
     if (m.repliedToMessage) {
       const r = m.repliedToMessage;
       body += `<div class="reply"><b>${escapeHtml(r.sender || '?')} · ${fmtTime(r.createdAt)}</b><div>${escapeHtml(r.body || '')}</div></div>`;
@@ -662,6 +706,7 @@ function buildHtml(username, messages, atts, attStates) {
   .day span { background: #f2f4f7; padding: 0 12px; position: relative; }
   .msg { background: #fff; border: 1px solid #e3e7ec; border-radius: 10px; padding: 12px 14px; margin: 10px 0; max-width: 82%; box-shadow: 0 1px 2px rgba(20,30,40,.05); }
   .msg.me { margin-left: auto; background: #e9f8f0; border-color: #cfeede; }
+  .msg.ai { border-style: dashed; background: #f3f9f6; }
   .meta { display: flex; justify-content: space-between; gap: 16px; font-size: 12px; color: #8a94a0; margin-bottom: 4px; }
   .meta b { color: #2b6cb0; font-weight: 600; }
   .msg.me .meta b { color: #159957; }
@@ -790,12 +835,13 @@ async function runExport() {
       }
 
       const base = `${dateOnly(lastTs)}_${sanitize(c.username)}`;
+      const asstLabel = assistantLabelFor(c.username);
       if (fmts.md) {
-        const md = buildMarkdown(c.username, messages, atts, attStates);
+        const md = buildMarkdown(c.username, messages, atts, attStates, asstLabel);
         await batcher.add(`${folder}/${base}.md`, md, { size: new Blob([md]).size, compress: true, date: new Date(toMs(lastTs)) });
       }
       if (fmts.html) {
-        const html = buildHtml(c.username, messages, atts, attStates);
+        const html = buildHtml(c.username, messages, atts, attStates, asstLabel);
         await batcher.add(`${folder}/${base}.html`, html, { size: new Blob([html]).size, compress: true, date: new Date(toMs(lastTs)) });
       }
       if (fmts.json) {
@@ -1594,6 +1640,10 @@ $('themeToggle').addEventListener('click', () => {
   chrome.storage.local.set({ uiTheme: next });
 });
 chrome.storage.local.get(['uiTheme'], res => applyTheme(res.uiTheme));
+
+// assistant-name fallback (persisted)
+$('asstName').addEventListener('change', () => chrome.storage.local.set({ uiAsstName: $('asstName').value.trim() }));
+chrome.storage.local.get(['uiAsstName'], res => { if (res.uiAsstName) $('asstName').value = res.uiAsstName; });
 
 window.addEventListener('beforeunload', (e) => {
   if (running) { e.preventDefault(); e.returnValue = ''; }
