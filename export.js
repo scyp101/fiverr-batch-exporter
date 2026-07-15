@@ -276,6 +276,11 @@ function assistantLabelFor(username) {
   return `${name} (AI)`;
 }
 
+// Applies the "include AI assistant replies" toggle.
+function filterAsst(messages) {
+  return $('inclAsst').checked ? messages : messages.filter(m => !isAssistantMsg(m));
+}
+
 // Walks a conversation's messages and produces the attachment manifest:
 // stable ids (username::seq in message order) plus the timestamped zip name.
 function indexAttachments(username, messages) {
@@ -578,7 +583,7 @@ async function runAnalyze() {
       const asstLabel = assistantLabelFor(c.username);
       const md = buildMarkdown(c.username, messages, atts, attStates, asstLabel);
       const html = buildHtml(c.username, messages, atts, attStates, asstLabel);
-      const json = JSON.stringify({ username: c.username, messages }, null, 2);
+      const json = JSON.stringify({ username: c.username, messages: filterAsst(messages) }, null, 2);
 
       c.analysis = {
         msgCount: messages.length,
@@ -613,16 +618,19 @@ async function runAnalyze() {
 function buildMarkdown(username, messages, atts, attStates, asstLabel) {
   const byAtt = new Map(atts.map(a => [a.att, a]));
   const senderOf = m => isAssistantMsg(m) ? (asstLabel || 'Assistant (AI)') : (m.sender || 'Unknown');
+  const visible = filterAsst(messages);
+  const excluded = messages.length - visible.length;
   let md = `# Conversation with ${username}\n\n`;
-  md += `- Messages: ${messages.length}\n`;
-  if (messages.length) {
-    md += `- First message: ${fmtTime(messages[0].createdAt)}\n`;
-    md += `- Last message: ${fmtTime(messages[messages.length - 1].createdAt)}\n`;
+  md += `- Messages: ${visible.length}\n`;
+  if (visible.length) {
+    md += `- First message: ${fmtTime(visible[0].createdAt)}\n`;
+    md += `- Last message: ${fmtTime(visible[visible.length - 1].createdAt)}\n`;
   }
-  if (asstLabel && messages.some(isAssistantMsg)) md += `- Includes automated replies sent by ${asstLabel}\n`;
+  if (excluded > 0) md += `- Omitted ${excluded} automated repl${excluded > 1 ? 'ies' : 'y'} from ${asstLabel || 'the AI assistant'}\n`;
+  else if (asstLabel && visible.some(isAssistantMsg)) md += `- Includes automated replies sent by ${asstLabel}\n`;
   md += `- Exported: ${fmtTime(Date.now())}\n\n---\n\n`;
 
-  for (const m of messages) {
+  for (const m of visible) {
     md += `### ${senderOf(m)} — ${fmtTime(m.createdAt)}\n\n`;
 
     if (m.repliedToMessage) {
@@ -658,10 +666,13 @@ function buildMarkdown(username, messages, atts, attStates, asstLabel) {
 function buildHtml(username, messages, atts, attStates, asstLabel) {
   const byAtt = new Map(atts.map(a => [a.att, a]));
   const senderOf = m => isAssistantMsg(m) ? (asstLabel || 'Assistant (AI)') : (m.sender || 'Unknown');
+  const visible = filterAsst(messages);
   let body = '';
   let currentDate = null;
+  const excluded = messages.length - visible.length;
+  if (excluded > 0) body += `<p class="omitted">${excluded} automated repl${excluded > 1 ? 'ies' : 'y'} from ${escapeHtml(asstLabel || 'the AI assistant')} omitted.</p>\n`;
 
-  for (const m of messages) {
+  for (const m of visible) {
     const dayStr = new Date(toMs(m.createdAt)).toDateString();
     if (dayStr !== currentDate) {
       body += `<div class="day"><span>${escapeHtml(dayStr)}</span></div>\n`;
@@ -707,6 +718,7 @@ function buildHtml(username, messages, atts, attStates, asstLabel) {
   .msg { background: #fff; border: 1px solid #e3e7ec; border-radius: 10px; padding: 12px 14px; margin: 10px 0; max-width: 82%; box-shadow: 0 1px 2px rgba(20,30,40,.05); }
   .msg.me { margin-left: auto; background: #e9f8f0; border-color: #cfeede; }
   .msg.ai { border-style: dashed; background: #f3f9f6; }
+  .omitted { text-align: center; color: #98a2ad; font-size: 12.5px; font-style: italic; }
   .meta { display: flex; justify-content: space-between; gap: 16px; font-size: 12px; color: #8a94a0; margin-bottom: 4px; }
   .meta b { color: #2b6cb0; font-weight: 600; }
   .msg.me .meta b { color: #159957; }
@@ -845,7 +857,7 @@ async function runExport() {
         await batcher.add(`${folder}/${base}.html`, html, { size: new Blob([html]).size, compress: true, date: new Date(toMs(lastTs)) });
       }
       if (fmts.json) {
-        const json = JSON.stringify({ username: c.username, messages }, null, 2);
+        const json = JSON.stringify({ username: c.username, messages: filterAsst(messages) }, null, 2);
         await batcher.add(`${folder}/${base}.json`, json, { size: json.length, compress: true, date: new Date(toMs(lastTs)) });
       }
 
@@ -1616,7 +1628,9 @@ document.querySelectorAll('#theadOrders .sortable').forEach(el => {
 // shared
 $('btnExport').addEventListener('click', () => activeTab === 'messages' ? runExport() : runExportOrders());
 $('btnCancel').addEventListener('click', () => { cancelled = true; $('btnCancel').disabled = true; setTimeout(() => $('btnCancel').disabled = false, 3000); });
-['fmtMd', 'fmtHtml', 'fmtJson', 'maxMB'].forEach(id => $(id).addEventListener('change', () => { refreshSummary(); refreshOrderSummary(); }));
+['fmtMd', 'fmtHtml', 'fmtJson', 'maxMB', 'inclAsst'].forEach(id => $(id).addEventListener('change', () => { refreshSummary(); refreshOrderSummary(); }));
+$('inclAsst').addEventListener('change', () => chrome.storage.local.set({ uiInclAsst: $('inclAsst').checked }));
+chrome.storage.local.get(['uiInclAsst'], res => { if (res.uiInclAsst === false) $('inclAsst').checked = false; });
 
 // part-limit stepper
 function stepMB(delta) {

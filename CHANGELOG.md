@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.4 — 2026-07-15
+
+### Added
+- **"Include replies" toggle for AI assistant messages.** Untick it (next to the AI assistant name field) to leave your assistant's automated replies out of all exported files — Markdown, HTML, and JSON. Transcripts note how many replies were omitted. The setting persists.
+
 ## 1.2.3 — 2026-07-15
 
 ### Fixed
