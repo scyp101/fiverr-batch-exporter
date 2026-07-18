@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.5 — 2026-07-15
+
+### Fixed
+- **Resolution details are now captured.** Resolution events (accepted / declined / withdrawn) previously rendered as a bare one-liner. They now include what was resolved (delivery extension, mutual cancellation, forced cancellation, partial refund), the stated reason, the full message, any reply, old → new due dates with the extension length, and partial-refund splits.
+- **Tip amounts are now captured.** `tip_given` timeline events show the amount, currency and the buyer's note; the order facts header sums all tips from the timeline (with the billing endpoint as fallback), and the HTML facts panel now includes a Tip field.
+
 ## 1.2.4 — 2026-07-15
 
 ### Added

@@ -1036,6 +1036,26 @@ function orderFolderTs(o) {
   return (o.analysis && o.analysis.completedTs) ? toMs(o.analysis.completedTs) : (o.dateMs || Date.now());
 }
 
+// Total tip for an order: sum of tip_given timeline activities (authoritative),
+// falling back to the TIP purchase in fetch_order_details (cents).
+function orderTipTotal(page, details) {
+  let amount = 0, currency = 'USD';
+  for (const a of (page.activities || [])) {
+    if (a.type === 'tip_given' && a.billing && Number(a.billing.totalAmount)) {
+      amount += Number(a.billing.totalAmount);
+      currency = a.billing.currency || currency;
+    }
+  }
+  if (!amount && details && details.purchases) {
+    for (const p of details.purchases) {
+      if (p.type === 'TIP' && p.billing && p.billing.grossAmount && p.billing.grossAmount.moneyInUsd) {
+        amount += Number(p.billing.grossAmount.moneyInUsd.amount) / 100;
+      }
+    }
+  }
+  return amount > 0 ? { amount, currency } : null;
+}
+
 // ---------- order transcript builders ----------
 function describeActivity(a, page, fileStates, filesByFileId, linkFn) {
   const lines = [];
@@ -1050,9 +1070,41 @@ function describeActivity(a, page, fileStates, filesByFileId, linkFn) {
     case 'order_placed': lines.push('**Order placed.**'); break;
     case 'order_started': lines.push('**Order started.**'); break;
     case 'order_completed': lines.push('**Order completed.**'); break;
-    case 'resolution_accepted': lines.push('**Resolution accepted.**'); break;
     case 'order_cancelled': lines.push('**Order cancelled.**'); break;
+    case 'requirements_provided':
+      lines.push('**Requirements provided.**');
+      renderFiles(a.attachments);
+      break;
     case 'due_date_updated': lines.push(`**Due date updated** → ${fmtTime(a.dueDate)}`); break;
+    case 'tip_given': {
+      const amount = a.billing && a.billing.totalAmount != null
+        ? ` — ${orderMoney(a.billing.totalAmount, a.billing.currency)}` : '';
+      lines.push(`**Tip given${amount}**`);
+      if (a.message) lines.push(a.message);
+      break;
+    }
+    case 'resolution_accepted':
+    case 'resolution_declined':
+    case 'resolution_withdrawn': {
+      const solutions = {
+        extend_delivery: 'extend the delivery time',
+        mutual_cancellation: 'cancel the order',
+        force_cancel: 'cancel the order (forced)',
+        partial_refund: 'partial refund'
+      };
+      const verb = { resolution_accepted: 'accepted', resolution_declined: 'declined', resolution_withdrawn: 'withdrawn' }[t];
+      lines.push(`**Resolution ${verb}${a.solution ? ` — ${solutions[a.solution] || String(a.solution).replace(/_/g, ' ')}` : ''}**`);
+      if (a.reason) lines.push(`Reason: ${String(a.reason).replace(/_/g, ' ')}${a.isCustomReason ? ' (custom)' : ''}`);
+      if (a.message) lines.push(a.message);
+      if (a.replyMessage) lines.push(`Reply: ${a.replyMessage}`);
+      if (a.solution === 'extend_delivery' && a.newDueDate) {
+        lines.push(`Due date: ${a.initialDueDate ? fmtTime(a.initialDueDate) + ' → ' : ''}${fmtTime(a.newDueDate)}${a.duration ? ` (+${a.duration} day${a.duration > 1 ? 's' : ''})` : ''}`);
+      }
+      if (a.solution === 'partial_refund' && (a.buyerAmount != null || a.sellerAmount != null)) {
+        lines.push(`Refund split — buyer: ${a.buyerAmount}, seller: ${a.sellerAmount}`);
+      }
+      break;
+    }
     case 'delivery_received': {
       const d = (page.deliveries || []).find(x => x.id === a.entityId);
       lines.push(`**Delivery #${d ? (d.serialNumber || '?') : '?'}**`);
@@ -1113,12 +1165,8 @@ function buildOrderMarkdown(o, page, details, files, fileStates) {
   if (page.completedAt) md += `- Completed: ${fmtTime(page.completedAt)}\n`;
   md += `- Order total: ${orderMoney(o.total, o.currency)}\n`;
   if (page.earnings && page.earnings.amount != null) md += `- Earned (after fees): ${orderMoney(page.earnings.amount, o.currency)}\n`;
-  if (details && details.purchases) {
-    const tip = details.purchases.find(x => x.type === 'TIP');
-    if (tip && tip.billing && tip.billing.grossAmount && tip.billing.grossAmount.moneyInUsd) {
-      md += `- Tip: ${orderMoney(tip.billing.grossAmount.moneyInUsd.amount / 100, 'USD')}\n`;
-    }
-  }
+  const tip = orderTipTotal(page, details);
+  if (tip) md += `- Tip: ${orderMoney(tip.amount, tip.currency)}\n`;
   md += `- Exported: ${fmtTime(Date.now())}\n`;
 
   if (details && details.description) {
@@ -1162,6 +1210,8 @@ function buildOrderHtml(o, page, details, files, fileStates) {
   if (page.completedAt) facts.push(['Completed', fmtTime(page.completedAt)]);
   facts.push(['Total', orderMoney(o.total, o.currency)]);
   if (page.earnings && page.earnings.amount != null) facts.push(['Earned', orderMoney(page.earnings.amount, o.currency)]);
+  const tipFact = orderTipTotal(page, details);
+  if (tipFact) facts.push(['Tip', orderMoney(tipFact.amount, tipFact.currency)]);
 
   let body = `<dl class="facts">${facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('')}</dl>`;
   if (details && details.description) body += `<div class="desc"><h2>Description</h2><p>${escapeHtml(details.description)}</p></div>`;

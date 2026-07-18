@@ -1,7 +1,7 @@
 ﻿{
   "manifest_version": 3,
   "name": "Fiverr Batch Exporter",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "description": "Back up all Fiverr conversations and orders as Markdown/HTML/JSON plus attachments, bundled into a few size-capped ZIP downloads.",
   "permissions": [
     "downloads",
